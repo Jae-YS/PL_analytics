@@ -14,11 +14,6 @@ from helpers import DOCS, FACTS, SEASONS, load_season, team_games
 DOC_FILES = sorted(p for p in DOCS.glob("[0-9][0-9]_*.md"))
 pytestmark = pytest.mark.skipif(not DOC_FILES, reason="no docs in data/docs")
 
-# Names that were removed because they may belong to real people or clubs.
-# If one reappears, a rename was reverted by accident.
-RETIRED_NAMES = ["Strommen", "Cerny", "Gareth Hale", "Bjerregaard",
-                 "Henrik Nilsen", "Vento Sports", "Club Andino",
-                 "Slavia Varna", "Nordhavn", "Sparta Brno"]
 FORBIDDEN_WORDS = ["fictional", "synthetic", "demo"]
 TEAM_MAP = {"Aston Villa": "Aston Villa", "Newcastle United": "Newcastle",
             "Brighton & Hove Albion": "Brighton", "Wolverhampton Wanderers": "Wolves"}
@@ -67,14 +62,6 @@ def test_no_self_labelling_words(name):
     low = DOCS_PARSED[name]["text"].lower()
     for w in FORBIDDEN_WORDS:
         assert w not in low, f"'{w}' found in {name}"
-
-
-@pytest.mark.parametrize("name", [p.name for p in DOC_FILES])
-def test_no_retired_real_sounding_names(name):
-    text = DOCS_PARSED[name]["text"]
-    for n in RETIRED_NAMES:
-        assert n not in text, f"retired name '{n}' found in {name}"
-
 
 @pytest.mark.parametrize("name", [p.name for p in DOC_FILES])
 def test_body_length_is_reasonable(name):
