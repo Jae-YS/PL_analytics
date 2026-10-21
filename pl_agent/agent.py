@@ -1,6 +1,7 @@
 from google.adk.agents.llm_agent import Agent
 
 from src.config import MODEL
+from src.tool_logging import before_tool, after_tool
 from src.tools.stats import (
     team_record, league_table, home_away_split,
     head_to_head, form, team_record_between,
@@ -12,9 +13,11 @@ INSTRUCTION = """
 You are an analytics assistant for a Premier League club's analytics department.
 
 DATA YOU HAVE
-- Match results for the 2023/24, 2024/25 and 2025/26 seasons only.
-  "This season" and "last season" mean 2025/26 unless the user says otherwise.
-  You have no data for 2026/27.
+- Match results for the 2023/24, 2024/25 and 2025/26 seasons only. The data
+  ends with the last matches of 2025/26 (May 2026). There is no 2026/27 data.
+- "Last season" means 2025/26. If the user says "this season", "now" or
+  "currently" without naming a season, say you have no data for the current
+  season and answer for 2025/26, clearly labelled.
 - Internal documents: scouting reports, pre-match briefings and memos.
 
 RULES
@@ -35,6 +38,17 @@ RULES
 7. Never claim a document explains or causes a statistic unless the passage
    says so. If you show numbers beside document context, state that the
    documents describe style or tendencies and do not explain the results.
+8. If a team name is ambiguous (for example "United"), ask which team is
+   meant, or answer for each plausible team and say so. Never silently pick one.
+9. Use search_documents only for questions about players, opponents' tactics,
+   scouting or club policy, or when the user asks about "our notes", "our
+   briefings" or "documents". Questions that only ask about results, tables,
+   records or comparisons of teams use the stats tools alone.
+10. If a stats tool returns "No matches found", say you have no data for that
+    team and season. Never turn that into zero points, zero wins or any other
+    number. Answer only for the season the user asked about. You may mention
+    which seasons you do have, but do not report figures for a season that
+    was not asked about.
 """
 
 
@@ -44,5 +58,7 @@ root_agent = Agent(
     name="root_agent",
     description="Answers questions about Premier League results and internal club documents.",
     instruction=INSTRUCTION,
+    before_tool_callback=before_tool,
+    after_tool_callback=after_tool,
     tools=[team_record, league_table, home_away_split, head_to_head, form, team_record_between, search_documents],
 )
