@@ -1,24 +1,7 @@
 import os
 import difflib
 import re
-import pandas as pd
-from pathlib import Path
-from functools import lru_cache 
 import psycopg
-# get_conn()	Reads DATABASE_URL from .env and returns a psycopg connection.	Default postgresql://pl:pl@localhost:5433/pl.
-# resolve_team(name)	Maps user input to the exact name in the data.	Case-insensitive. Use an alias dict (Manchester City, Man Utd, Spurs, Tottenham Hotspur, Nottingham Forest, Wolverhampton Wanderers, Newcastle United, Brighton & Hove Albion). Otherwise raise ValueError listing close matches (difflib.get_close_matches).
-# resolve_season(s)	Maps "2023/24", "2023-24", "23/24" and "2324" to "2324".	The tests cover all four.
-
-# resolve_team and resolve_season are public, since the tests call them directly.
-
-# Agent tools
-# Function	Returns	Test anchors
-# team_record(team, season)	A dict with team, season, matches_counted and played, wins, draws, losses, goals_for, goals_against, goal_difference, points.	If no rows exist, return {"error": "..."} instead of zeros.
-# league_table(season)	A list of 20 dicts with position, team and the same record fields.	Sort by points, then goal difference, then goals for, then team name.
-# home_away_split(team, season)	{"home": {...}, "away": {...}}, each with played, wins, draws, losses, goals_for, goals_against, points.	Brighton 2425: home 32 points, away 29.
-# head_to_head(team_a, team_b, season=None)	{"matches": [...], "summary": {"team_a_wins", "team_b_wins", "draws"}}.	Matches are oldest first. Each has date, home_team, away_team, home_goals, away_goals. Man City vs Arsenal across all seasons gives 1, 2 and 3.
-# form(team, n=5, season=None)	{"matches": [...], "points": int} with the newest match first.	Each match has date, opponent, venue ("H" or "A"), goals_for, goals_against, result ("W", "D" or "L"). If season is None, use the latest season in the table.
-# team_record_between(team, start_date, end_date)	The same fields as team_record.	Dates are inclusive ISO strings. Newcastle for September 2024 gives 4 played, 2 wins, 1 draw, 1 loss, 6 for, 6 against and 7 points.
 
 def _get_conn():
     try:
@@ -76,6 +59,42 @@ def _norm(s: str) -> str:
 _LOOKUP = {_norm(t): t for t in TEAMS}
 _LOOKUP.update({_norm(a): c for a, c in ALIASES.items()})
 
+_CTE = """
+WITH tm AS (
+  SELECT season, match_date, home_team AS team, away_team AS opponent,
+         'H' AS venue, home_goals AS gf, away_goals AS ga FROM matches
+  UNION ALL
+  SELECT season, match_date, away_team, home_team,
+         'A', away_goals, home_goals FROM matches
+)
+"""
+
+_AGG = """
+  COUNT(*),
+  COUNT(*) FILTER (WHERE gf > ga),
+  COUNT(*) FILTER (WHERE gf = ga),
+  COUNT(*) FILTER (WHERE gf < ga),
+  COALESCE(SUM(gf), 0),
+  COALESCE(SUM(ga), 0)
+"""
+
+
+def _record(team, season, played, wins, draws, losses, gf, ga) -> dict:
+    gf, ga = int(gf), int(ga)
+    return {
+        "team": team,
+        "season": season,
+        "matches_counted": played,
+        "played": played,
+        "wins": wins,
+        "draws": draws,
+        "losses": losses,
+        "goals_for": gf,
+        "goals_against": ga,
+        "goal_difference": gf - ga,
+        "points": 3 * wins + draws,
+    }
+    
 
 def resolve_team(name: str) -> str:
     key = _norm(name)
@@ -105,111 +124,160 @@ def resolve_season(s: str) -> str:
         raise ValueError(f"Invalid season format: {s}. Expected formats: 'YYYY/YY', 'YYYY-YY', 'YY/YY', or 'YYYY'.")
     
     
+def resolve_date(date_str: str) -> str:
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
+        return date_str  
+    elif re.match(r"^\d{2}/\d{2}/\d{4}$", date_str):
+        parts = date_str.split("/")
+        return f"{parts[2]}-{parts[1]}-{parts[0]}"  
+    else:
+        raise ValueError(f"Invalid date format: {date_str}. Expected formats: 'YYYY-MM-DD' or 'DD/MM/YYYY'.")
+
 def team_record(team: str, season: str) -> dict:
     team = resolve_team(team)
     season = resolve_season(season)
     with _get_conn() as conn:
         row = conn.execute(
-            "SELECT COUNT(*), "
-            "SUM(CASE WHEN home_team=%s THEN home_goals ELSE away_goals END), "
-            "SUM(CASE WHEN home_team=%s THEN away_goals ELSE home_goals END), "
-            "SUM(CASE "
-            "    WHEN home_team=%s AND home_goals > away_goals THEN 1 "
-            "    WHEN away_team=%s AND away_goals > home_goals THEN 1 ELSE 0 END), "
-            "SUM(CASE WHEN home_goals = away_goals THEN 1 ELSE 0 END), "
-            "SUM(CASE"
-            "    WHEN home_team=%s AND home_goals < away_goals THEN 1 "
-            "    WHEN away_team=%s AND away_goals < home_goals THEN 1 ELSE 0 END) "
-            "FROM matches WHERE season=%s AND (home_team=%s OR away_team=%s)",
-            (team, team, team, team, team, team, season, team, team),
+            f"{_CTE} SELECT {_AGG} FROM tm WHERE season=%s AND team=%s",
+            (season, team),
         ).fetchone()
         if row[0] == 0:
             return {"error": f"No matches found for {team} in season {season}"}
-        matches_counted, goals_for, goals_against, wins, draws, losses = row
-        goal_difference = goals_for - goals_against
-        points = wins * 3 + draws
-        return {
-            "team": team,
-            "season": season, 
-            "matches_counted": matches_counted,
-            "played": matches_counted,
-            "wins": wins,
-            "draws": draws,
-            "losses": losses,
-            "goals_for": goals_for,
-            "goals_against": goals_against,
-            "goal_difference": goal_difference,
-            "points": points,
-        }
+        return _record(team, season, *row)
 
 
 def league_table(season: str) -> list:    
     season = resolve_season(season)
     with _get_conn() as conn:
         rows = conn.execute(
-            "SELECT home_team FROM matches WHERE season=%s "
-            "UNION "
-            "SELECT away_team FROM matches WHERE season=%s",
-            (season, season),
+            f"{_CTE} SELECT team, {_AGG} FROM tm WHERE season=%s GROUP BY team",
+            (season,),
         ).fetchall()
     if not rows:
         return [{"error": f"No matches found for season {season}"}]
 
-    teams = [team_record(r[0], season) for r in rows]
-    teams.sort(key=lambda x: (-x["points"], -x["goal_difference"],
+    table = [_record(r[0], season, *r[1:]) for r in rows]
+    table.sort(key=lambda x: (-x["points"], -x["goal_difference"],
                               -x["goals_for"], x["team"]))
-    for i, t in enumerate(teams, start=1):
-        t["position"] = i
-    return teams
+    for i, row in enumerate(table, start=1):
+        row["position"] = i
+    return table
 
 
 def home_away_split(team: str, season: str) -> dict:
     team = resolve_team(team)
     season = resolve_season(season)
+    sides = {}
     with _get_conn() as conn:
-        home_row = conn.execute(
-            "SELECT COUNT(*), SUM(home_goals), SUM(away_goals), "
-            "SUM(CASE WHEN home_goals > away_goals THEN 1 ELSE 0 END), "
-            "SUM(CASE WHEN home_goals = away_goals THEN 1 ELSE 0 END), "
-            "SUM(CASE WHEN home_goals < away_goals THEN 1 ELSE 0 END) "
-            "FROM matches WHERE season=%s AND home_team=%s",
-            (season, team),
-        ).fetchone()
-        away_row = conn.execute(
-            "SELECT COUNT(*), SUM(away_goals), SUM(home_goals), "
-            "SUM(CASE WHEN away_goals > home_goals THEN 1 ELSE 0 END), "
-            "SUM(CASE WHEN away_goals = home_goals THEN 1 ELSE 0 END), "
-            "SUM(CASE WHEN away_goals < home_goals THEN 1 ELSE 0 END) "
-            "FROM matches WHERE season=%s AND away_team=%s",
-            (season, team),
-        ).fetchone()
-        def make_record(row):
-            played, goals_for, goals_against, wins, draws, losses = row
-            points = wins * 3 + draws
-            return {
+        for name, venue in (("home", "H"), ("away", "A")):
+            played, wins, draws, losses, gf, ga = conn.execute(
+                f"{_CTE} SELECT {_AGG} FROM tm "
+                "WHERE season=%s AND team=%s AND venue=%s",
+                (season, team, venue),
+            ).fetchone()
+            sides[name] = {
                 "played": played,
                 "wins": wins,
                 "draws": draws,
                 "losses": losses,
-                "goals_for": goals_for,
-                "goals_against": goals_against,
-                "points": points,
+                "goals_for": int(gf),
+                "goals_against": int(ga),
+                "points": 3 * wins + draws,
             }
-        return {
-            "home": make_record(home_row),
-            "away": make_record(away_row),
-        }
-
+    if sides["home"]["played"] + sides["away"]["played"] == 0:
+        return {"error": f"No matches found for {team} in season {season}"}
+    return sides
 
 def head_to_head(team_a: str, team_b: str, season: str = None) -> dict:
         team_a = resolve_team(team_a)
         team_b = resolve_team(team_b)
-        season = resolve_season(season)
-        pass
+        sql = (f"{_CTE} SELECT match_date, venue, gf, ga FROM tm "
+                "WHERE team=%s AND opponent=%s")
+        params = [team_a, team_b]
+        if season:
+            season = resolve_season(season)
+            sql += " AND season=%s"
+            params.append(season)
+        sql += " ORDER BY match_date"
+
+        with _get_conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        if not rows:
+            return {"error": f"No matches found between {team_a} and {team_b}"
+                            + (f" in season {season}" if season else "")}
+
+        matches = []
+        summary = {"team_a_wins": 0, "team_b_wins": 0, "draws": 0}
+        for match_date, venue, gf, ga in rows:
+            if venue == "H":    
+                home, away, hg, ag = team_a, team_b, gf, ga
+            else:               
+                home, away, hg, ag = team_b, team_a, ga, gf
+            matches.append({
+                "date": match_date.isoformat(),
+                "home_team": home, "away_team": away,
+                "home_goals": hg, "away_goals": ag,
+            })
+            if gf > ga:
+                summary["team_a_wins"] += 1
+            elif gf < ga:
+                summary["team_b_wins"] += 1
+            else:
+                summary["draws"] += 1
+
+        return {"team_a": team_a, "team_b": team_b,
+                "matches": matches, "summary": summary}
+
+
 
 
 def form(team: str, n: int = 5, season: str = None) -> dict:
-    pass
+    team = resolve_team(team)
+    
+    sql = (f"{_CTE} SELECT match_date, opponent, venue, gf, ga FROM tm WHERE team=%s")
+    params = [team]
+    if season:
+        season = resolve_season(season)
+        sql += " AND season=%s"
+        params.append(season)
+    
+    sql += " ORDER BY match_date DESC LIMIT %s"
+    params.append(n)
+    
+    with _get_conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    
+    if not rows:
+        return {"error": f"No matches found for {team}" + (f" in season {season}" if season else "")}
+    
+    matches = []
+    points = 0
+    for match_date, opponent, venue, gf, ga in rows:
+        result = "W" if gf > ga else "D" if gf == ga else "L"
+        points += 3 if result == "W" else 1 if result == "D" else 0
+        matches.append({
+            "date": match_date.isoformat(),
+            "opponent": opponent,
+            "venue": venue,
+            "goals_for": gf,
+            "goals_against": ga,
+            "result": result,
+        })
+
+    return {"team": team, "matches": matches, "points": points}
+    
+        
     
 def team_record_between(team: str, start_date: str, end_date: str) -> dict:
-    pass
+    team = resolve_team(team)
+    start_date = resolve_date(start_date)
+    end_date = resolve_date(end_date)
+    with _get_conn() as conn:
+        row = conn.execute(
+            f"{_CTE} SELECT {_AGG} FROM tm "
+            "WHERE team=%s AND match_date BETWEEN %s AND %s",
+            (team, start_date, end_date),
+        ).fetchone()
+        if row[0] == 0:
+            return {"error": f"No matches found for {team} between {start_date} and {end_date}"}
+        return _record(team, f"{start_date} to {end_date}", *row)
