@@ -4,7 +4,8 @@ score_row() compares one answer with one row of evals/eval_set.jsonl.
 summarize() turns a list of scored results into a markdown report.
 
 Statuses:
-  pass          right tools, right values (or a correct refusal)
+  pass          right tools, right values (or a correct refusal).
+                A row may also list expected_tools_any: at least one must be called.
   fail          wrong tools, wrong or missing values, or no refusal when needed
   review        tools were right but the row has no machine-checkable values
   infra_error   429 / 5xx / timeout after all retries. NOT counted as wrong.
@@ -14,8 +15,10 @@ import re
 
 REFUSAL_PATTERNS = [
     r"\bnot (in|included in|contained in|found in|covered (in|by))\b",
-    r"\b(do(es)? not|don't|doesn't|did not|didn't) (contain|include|have|provide|mention|specify|list|cover|name)\b",
-    r"\bno (information|data|record|records|matches|mention|figures?)\b",
+    r"\b(do(es)? not|don't|doesn't|did not|didn't) (contain|include|have|provide|mention|specify|list|cover|name|"
+    r"state|say|report|give|show|indicate|detail|identify|supply|record|reveal|describe|offer|capture|track)\b",
+    r"\bno (information|data|record|records|matches|mention|figures?|numbers?|counts?|details|statistics|stats)\b",
+    r"\b(nothing|none) (about|on|in|of)\b",
     r"\b(cannot|can't|can not|unable to|couldn't|could not)\b",
     r"\b(isn't|is not|aren't|are not|wasn't|weren't) (available|provided|stated|specified|included|mentioned|named)\b",
     r"\bnot (available|provided|stated|specified|mentioned)\b",
@@ -51,9 +54,13 @@ def score_row(row: dict, answer: str, tools_called, error_kind=None) -> dict:
 
     missing = [t for t in row["expected_tools"] if t not in called]
     forbidden = [t for t in row["forbidden_tools"] if t in called]
-    tool_ok = not missing and not forbidden
+    any_of = row.get("expected_tools_any", [])           # optional: at least one of these
+    any_missing = bool(any_of) and not (set(any_of) & called)
+    tool_ok = not missing and not forbidden and not any_missing
     reasons += [f"missing tool {t}" for t in missing]
     reasons += [f"forbidden tool {t} called" for t in forbidden]
+    if any_missing:
+        reasons.append(f"none of {any_of} called")
 
     values_ok = True
     for s in row["expected_all"]:
@@ -112,7 +119,7 @@ def summarize(results, meta=None, price_in=None, price_out=None) -> str:
     out_tok = sum(r.get("output_tokens", 0) + r.get("thought_tokens", 0) for r in results)
 
     out = ["# Eval report", ""]
-    for k in ("model", "location", "timestamp"):
+    for k in ("eval set", "model", "location", "timestamp"):
         if meta.get(k):
             out.append(f"- {k}: {meta[k]}")
     out += [f"- questions: {len(results)}", ""]
@@ -147,6 +154,8 @@ def summarize(results, meta=None, price_in=None, price_out=None) -> str:
         out += ["## Needs attention", "", "| ID | Status | Details |", "|---|---|---|"]
         for r in bad:
             detail = "; ".join(r["reasons"]) if r["reasons"] else ""
+            if "no refusal detected" in r["reasons"]:
+                detail += " | answer: " + r.get("answer", "")[:110].replace("\n", " ")
             if r["status"] == "review":
                 detail = "check by hand: " + (r.get("answer", "")[:90].replace("\n", " "))
             out.append(f"| {r['id']} | {r['status']} | {detail} |")

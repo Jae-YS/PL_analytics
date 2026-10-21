@@ -33,8 +33,8 @@ load_dotenv(ROOT / ".env")
 
 from src.eval_scoring import classify_error, score_row, summarize 
 
-# EVAL_SET = ROOT / "evals" / "eval_set.jsonl"
-EVAL_SET = ROOT / "evals" / "harder_set.jsonl"
+EVAL_SET = ROOT / "evals" / "eval_set.jsonl"
+# EVAL_SET = ROOT / "evals" / "harder_set.jsonl"
 RESULTS = ROOT / "evals" / "results"
 APP_NAME = "pl_agent"        
 USER_ID = "eval"
