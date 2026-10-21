@@ -33,7 +33,7 @@ load_dotenv(ROOT / ".env")
 
 from src.eval_scoring import classify_error, score_row, summarize 
 
-EVAL_SET = ROOT / "evals" / "eval_set.jsonl"
+DEFAULT_SET = "evals/eval_set.jsonl"
 # EVAL_SET = ROOT / "evals" / "harder_set.jsonl"
 RESULTS = ROOT / "evals" / "results"
 APP_NAME = "pl_agent"        
@@ -41,7 +41,8 @@ USER_ID = "eval"
 
 
 def load_rows(args):
-    rows = [json.loads(line) for line in EVAL_SET.read_text(encoding="utf-8").splitlines() if line.strip()]
+    path = ROOT / args.file
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     if args.ids:
         wanted = {i.strip() for i in args.ids.split(",")}
         rows = [r for r in rows if r["id"] in wanted]
@@ -143,6 +144,7 @@ def main():
     ap.add_argument("--price-in", type=float, help="USD per 1M input tokens")
     ap.add_argument("--price-out", type=float, help="USD per 1M output tokens")
     ap.add_argument("--dry-run", action="store_true", help="list the selected questions and exit")
+    ap.add_argument("--file", default=DEFAULT_SET, help="eval set to run, relative to the repo root")
     args = ap.parse_args()
 
     rows = load_rows(args)
@@ -156,12 +158,14 @@ def main():
 
     results, model = asyncio.run(run(rows, args))
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    set_name = (ROOT / args.file).stem.replace("_", "-")
     RESULTS.mkdir(parents=True, exist_ok=True)
-    stem = RESULTS / f"run_{stamp}_{re.sub(r'[^A-Za-z0-9.-]', '', model)}"
+    stem = RESULTS / f"run_{stamp}_{set_name}_{re.sub(r'[^A-Za-z0-9.-]', '', model)}"
     stem.with_suffix(".jsonl").write_text(
         "\n".join(json.dumps(r, ensure_ascii=False) for r in results) + "\n", encoding="utf-8")
     meta = {"model": model, "location": os.getenv("GOOGLE_CLOUD_LOCATION"), "timestamp": stamp}
     report = summarize(results, meta, args.price_in, args.price_out)
+    report = report.replace("- model:", f"- eval set: {set_name}\n- model:", 1)
     stem.with_suffix(".md").write_text(report, encoding="utf-8")
     print("\n" + report)
     print(f"\nSaved {stem.name}.jsonl and {stem.name}.md in {RESULTS}")
