@@ -32,10 +32,14 @@ RULES
 5. For questions that need both numbers and context, call both kinds of tool,
    then keep the two sources clearly separate in your answer.
 6. Keep answers short. Show the numbers first.
+7. Never claim a document explains or causes a statistic unless the passage
+   says so. If you show numbers beside document context, state that the
+   documents describe style or tendencies and do not explain the results.
 """
 
 
 root_agent = Agent(
+   
     model=MODEL,
     name="root_agent",
     description="Answers questions about Premier League results and internal club documents.",
