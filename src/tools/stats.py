@@ -90,15 +90,19 @@ def resolve_team(name: str) -> str:
 
 
 def resolve_season(s: str) -> str:
+    if s is None:
+        raise ValueError("Season cannot be None. Expected formats: 'YYYY/YY', 'YYYY-YY', 'YY/YY', or 'YYYY'.")
     s = s.strip().replace("-", "/")
-    if re.match(r"^\d{2}/\d{2}$", s):
+    if re.match(r"^\d{4}/\d{2}$", s):
+        return s[2:4] + s[5:7]
+    elif re.match(r"^\d{2}/\d{2}$", s):
         return s[0:2] + s[3:5]
     elif re.match(r"^\d{4}$", s):
-        return s[2:4] + s[4:6]
-    elif re.match(r"^\d{4}/\d{2}$", s):
-        return s[2:4] + s[5:7]
+        return s  
+    elif re.match(r"^\d{2}$", s):
+        return s
     else:
-        raise ValueError(f"Invalid season format: {s}")
+        raise ValueError(f"Invalid season format: {s}. Expected formats: 'YYYY/YY', 'YYYY-YY', 'YY/YY', or 'YYYY'.")
     
     
 def team_record(team: str, season: str) -> dict:
@@ -106,12 +110,18 @@ def team_record(team: str, season: str) -> dict:
     season = resolve_season(season)
     with _get_conn() as conn:
         row = conn.execute(
-            "SELECT COUNT(*), SUM(home_goals), SUM(away_goals), "
-            "SUM(CASE WHEN home_goals > away_goals THEN 1 ELSE 0 END), "
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN home_team=%s THEN home_goals ELSE away_goals END), "
+            "SUM(CASE WHEN home_team=%s THEN away_goals ELSE home_goals END), "
+            "SUM(CASE "
+            "    WHEN home_team=%s AND home_goals > away_goals THEN 1 "
+            "    WHEN away_team=%s AND away_goals > home_goals THEN 1 ELSE 0 END), "
             "SUM(CASE WHEN home_goals = away_goals THEN 1 ELSE 0 END), "
-            "SUM(CASE WHEN home_goals < away_goals THEN 1 ELSE 0 END) "
+            "SUM(CASE"
+            "    WHEN home_team=%s AND home_goals < away_goals THEN 1 "
+            "    WHEN away_team=%s AND away_goals < home_goals THEN 1 ELSE 0 END) "
             "FROM matches WHERE season=%s AND (home_team=%s OR away_team=%s)",
-            (season, team, team),
+            (team, team, team, team, team, team, season, team, team),
         ).fetchone()
         if row[0] == 0:
             return {"error": f"No matches found for {team} in season {season}"}
@@ -133,28 +143,24 @@ def team_record(team: str, season: str) -> dict:
         }
 
 
-def league_table(season: str) -> list:
+def league_table(season: str) -> list:    
     season = resolve_season(season)
     with _get_conn() as conn:
         rows = conn.execute(
-            "SELECT home_team as teams, "
-            "FROM matches WHERE season=%s GROUP BY home_team", (season,)
+            "SELECT home_team FROM matches WHERE season=%s "
+            "UNION "
+            "SELECT away_team FROM matches WHERE season=%s",
+            (season, season),
         ).fetchall()
-        teams = []
-        for team in rows:
-            record = team_record(team[0], season)
-            teams.append({
-                "position": None,
-                "team": team[0],
-                **record,
-            })
-        teams.sort(key=lambda x: (-x["points"], -x["goal_difference"], -x["goals_for"], x["team"]))
-        
-        table = []
-        for i, team in enumerate(teams, start=1):
-            team["position"] = i
-            table.append(team)
-        return table
+    if not rows:
+        return [{"error": f"No matches found for season {season}"}]
+
+    teams = [team_record(r[0], season) for r in rows]
+    teams.sort(key=lambda x: (-x["points"], -x["goal_difference"],
+                              -x["goals_for"], x["team"]))
+    for i, t in enumerate(teams, start=1):
+        t["position"] = i
+    return teams
 
 
 def home_away_split(team: str, season: str) -> dict:

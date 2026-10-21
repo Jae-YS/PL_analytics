@@ -67,6 +67,7 @@ def test_resolve_season_formats(raw):
 def test_team_record_matches_csv_oracle(season, team):
     got = stats.team_record(team, season)
     want = oracle_record(load_season(season), team)
+    print(f"{team} {season}: got {got}, want {want}")
     for field in RECORD_FIELDS:
         assert got[field] == want[field], f"{team} {season} {field}"
 
