@@ -4,6 +4,7 @@ An agent that answers questions about Premier League results by combining
 exact SQL analytics with retrieval over internal-style documents. Built with
 Google ADK, Gemini on Vertex AI, and Postgres + pgvector.
 
+**Status:** runs locally (Docker Postgres + Vertex AI). Not yet deployed.
 
 ## What it does
 
@@ -165,12 +166,46 @@ answers. All runs are kept in `evals/results/`.
 Costs use list prices of $0.30 per million input tokens and $2.50 per million
 output tokens. Confirm against current Google pricing.
 
-**Latency stalls.** In the main-set run, three questions (U03, R01, R05) took
-32.1 s, 24.2 s and 17.7 s while the rest took about 2 to 3 s. Each of those
-spent under a second inside its tool, so the delay is in the model call or the
-client, not in the SQL or vector search. The hard-set run had no stalls. The
-cause is not yet isolated, so p50 is the typical figure and the max is the
+**Latency stalls.** In the first main-set run, three questions (U03, R01, R05)
+took 32.1 s, 24.2 s and 17.7 s while the rest took about 2 to 3 s. Each of
+those spent under a second inside its tool, so the delay is in the model call
+or the client, not in the SQL or vector search. In three repeat runs the stalls
+landed on different rows (S02 at 28.1 s, then R01 at 8.5 s, then C03 at
+11.6 s), and the hard set never exceeded 6.4 s. That pattern fits transient API
+behavior, but the cause is not isolated: the harness records total latency per
+question, not per model call. p50 is the typical figure and the max is the
 worst case.
+
+### Consistency
+
+Each set was run 3 more times on the same model and instructions
+(`gemini-3.5-flash-lite`, `global`, 21 October 2026). All result files are in
+`evals/results/`.
+
+| | Run 1 | Run 2 | Run 3 |
+| --- | --- | --- | --- |
+| Main set (pass / fail / review) | 24 / 0 / 1 | 24 / 0 / 1 | 24 / 0 / 1 |
+| Main set latency p50 / max | 2.4 s / 28.1 s | 2.4 s / 8.5 s | 2.3 s / 11.6 s |
+| Hard set (pass / fail / review) | 12 / **1** / 1 | 13 / 0 / 1 | 13 / 0 / 1 |
+| Hard set latency p50 / max | 2.7 s / 5.5 s | 2.5 s / 5.8 s | 2.6 s / 6.4 s |
+
+38 of the 39 questions had the same status in all three runs. The one that
+changed is **H06** ("How did Arsenal do this season?"). The instructions say to
+state that there is no data for the current season and answer for 2025/26.
+H06 failed in the first hard-set run and passed in the other two. I then ran
+H06 alone 10 times: 9 passed and 1 failed, so 2 failures in 13 runs overall.
+
+Both failing answers had the right numbers (85 points) and labelled the season
+2025/26, and both mentioned that the data ends in May 2026. Neither said
+outright that the current season is not covered, which is what the check
+requires. I kept the check strict instead of widening it to accept the
+cutoff wording, and I did not change the instructions. H06 is therefore a
+known flaky row, roughly 15% failure on this sample (13 runs, too few for a
+tight estimate).
+
+S06 and H05 are reviewed by hand because the automatic check cannot judge
+them. S06 was checked against the raw CSVs in all three repeat runs and the
+head-to-head results were correct each time.
 
 ### How the results changed
 
@@ -208,7 +243,9 @@ top-1 [fill in], top-3 [fill in].
 - H06's check was widened after a correct answer failed on wording.
 - 25 + 14 questions, single runs, one model. A perfect score here is not proof
   of robustness.
-- Run-to-run consistency and a set of fresh, untuned questions are [not yet run].
+- Consistency was checked with 3 runs per set (see above). H06 is flaky and
+  was left failing when it fails: its check was not loosened a second time.
+- A set of fresh, untuned questions is [not yet run].
 
 ## Limitations
 
@@ -219,8 +256,10 @@ top-1 [fill in], top-3 [fill in].
 - Documents are synthetic.
 - Two rows (S06, H05) are checked by hand because the automatic check cannot
   judge them.
-- Latency has occasional stalls of 17 to 32 s on single questions. The cause
-  is not yet isolated (see Evaluation).
+- Latency has occasional stalls of 8 to 32 s on single questions, on different
+  rows in different runs. The cause is not yet isolated (see Evaluation).
+- H06 fails on about 15% of runs on this sample (2 of 13), by not saying
+  outright that the current season has no data.
 - The `global` endpoint does not pin requests to one region. For regulated
   data you would use a regional endpoint and choose a model by where it is
   available.

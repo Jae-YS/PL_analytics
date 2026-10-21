@@ -1,0 +1,34 @@
+# Eval report
+
+- eval set: harder-set
+- model: gemini-3.5-flash-lite
+- location: global
+- timestamp: 20261021_174029
+- questions: 14
+
+## Results by category
+
+| Category | Pass | Fail | Review | Infra error | Other error | Accuracy |
+|---|---|---|---|---|---|---|
+| stats | 5 | 0 | 0 | 0 | 0 | 5/5 |
+| robustness | 2 | 1 | 1 | 0 | 0 | 2/3 |
+| unanswerable | 1 | 0 | 0 | 0 | 0 | 1/1 |
+| docs | 3 | 0 | 0 | 0 | 0 | 3/3 |
+| combined | 1 | 0 | 0 | 0 | 0 | 1/1 |
+| **all** | 12 | 1 | 1 | 0 | 0 | **12/13** |
+
+Accuracy = pass / (pass + fail). Review rows and infrastructure failures (429, 5xx, timeouts) are not counted as wrong.
+
+## Tool choice, latency, cost
+
+- Right tools on 14/14 completed questions
+- Latency: p50 2.7s, p95 5.4s, max 5.5s
+- Tokens: 57,137 input, 2,781 output (including thinking)
+- Estimated cost: $0.0241 total, $0.0017 per question (at $0.3/M input, $2.5/M output)
+
+## Needs attention
+
+| ID | Status | Details |
+|---|---|---|
+| H05 | review | check by hand: The team name "United" is ambiguous, as it could refer to Manchester United or West Ham Un |
+| H06 | fail | none of expected_any found |
