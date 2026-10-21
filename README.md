@@ -45,7 +45,8 @@ src/             config.py (model name), embeddings.py (Vertex embeddings),
                  eval_scoring.py (scoring and report)
 scripts/         load_matches.py, ingest_docs.py, run_eval.py, check_model.py
 data/docs/       12 synthetic scouting reports, briefings and memos
-evals/           eval_set.jsonl (25 questions), doc_facts.md, results/
+evals/           eval_set.jsonl (25 questions), harder_set.jsonl (14 questions),
+                 doc_facts.md, results/
 tests/           pytest suite (data, docs, stats, retrieval, eval set,
                  tool logging, scoring)
 ```
@@ -125,46 +126,69 @@ Root `.env`:
 
 ## Evaluation
 
-`evals/eval_set.jsonl` has 25 questions: 9 stats, 7 documents, 3 combined and
-6 unanswerable (the agent should decline). Each row lists the tools that must
-and must not be called, the strings the answer must contain, and whether a
-refusal is expected. Stats answers are checked against the raw CSVs and
-document answers against the source files by `tests/test_eval_set.py`.
+Two eval sets. Each row lists the tools that must and must not be called, the
+strings the answer must contain, and whether a refusal is expected.
+
+| Set | File | Questions |
+| --- | --- | --- |
+| Main | `evals/eval_set.jsonl` | 25: 9 stats, 7 docs, 3 combined, 6 unanswerable |
+| Hard | `evals/harder_set.jsonl` | 14: typos, ambiguity, prompt injection, multi-document, multi-season |
+
+Stats answers are checked against the raw CSVs and document answers against the
+source files by `tests/test_eval_set.py`.
 
 ```bash
-python -m scripts.run_eval --dry-run                          # list questions, no model calls
-python -m scripts.run_eval --price-in 0.30 --price-out 2.50   # run all, with a cost estimate
-python -m scripts.run_eval --ids S01,U01                      # run a few
+python -m scripts.run_eval --dry-run                                  # list questions, no model calls
+python -m scripts.run_eval --price-in 0.30 --price-out 2.50           # main set, with a cost estimate
+python -m scripts.run_eval --file evals/harder_set.jsonl              # hard set
+python -m scripts.run_eval --ids S01,U01                              # a few rows
 ```
 
 Each run writes a `.jsonl` record per question and a markdown report to
-`evals/results/`. Infrastructure failures (429, 5xx, timeouts) are retried,
-then reported separately and not counted as wrong answers.
+`evals/results/`, named with the set and model. Infrastructure failures (429,
+5xx, timeouts) are retried, then reported separately and not counted as wrong
+answers. All runs are kept in `evals/results/`.
 
-### Baseline (21 October 2026)
+### Results (21 October 2026)
 
-`gemini-3.5-flash-lite` on the `global` endpoint, single run:
+`gemini-3.5-flash-lite` on the `global` endpoint, single runs:
 
-| Category | Questions | Pass | Fail |
-| --- | --- | --- | --- |
-| stats | 9 | 9 (8 automatic, 1 checked by hand) | 0 |
-| docs | 7 | 7 | 0 |
-| combined | 3 | 3 | 0 |
-| unanswerable | 6 | 6 | 0 |
-| **all** | **25** | **25** | **0** |
+| | Main set | Hard set |
+| --- | --- | --- |
+| Pass / fail | 24 / 0, plus 1 checked by hand (S06) | 13 / 0, plus 1 checked by hand (H05) |
+| Right tools called | 25 of 25 | 14 of 14 |
+| Latency p50 | 2.6 s | 2.5 s |
+| Latency p95 / max | 24.2 s / 32.1 s | 6.8 s / 9.1 s |
+| Tokens (in / out) | 66,286 / 3,056 | 62,538 / 2,832 |
+| Estimated cost per question | $0.0011 | $0.0018 |
 
-- Right tools called on 25 of 25 questions.
-- Latency: p50 2.1 s, p95 3.2 s, max 3.6 s.
-- Tokens: 56,600 input, 2,795 output (including thinking).
-- Estimated cost: about $0.024 for the whole set, roughly $0.001 per
-  question, at published list prices of $0.30 per million input tokens and
-  $2.50 per million output tokens. Confirm against current Google pricing.
+Costs use list prices of $0.30 per million input tokens and $2.50 per million
+output tokens. Confirm against current Google pricing.
 
-How to read this: the eval set was written alongside the agent, and some
-questions (a refusal and a "notes do not explain results" case) informed its
-instructions. So the baseline is a regression check, not an unbiased accuracy
-estimate. It is also 25 questions, one run, one model. A harder held-out set
-and run-to-run consistency checks are next.
+**Latency stalls.** In the main-set run, three questions (U03, R01, R05) took
+32.1 s, 24.2 s and 17.7 s while the rest took about 2 to 3 s. Each of those
+spent under a second inside its tool, so the delay is in the model call or the
+client, not in the SQL or vector search. The hard-set run had no stalls. The
+cause is not yet isolated, so p50 is the typical figure and the max is the
+worst case.
+
+### How the results changed
+
+| Stage | Main set | Hard set |
+| --- | --- | --- |
+| First run | 25/25 | 11/13, 1 for hand review |
+| After instruction changes | 1 failure (U05) | 12/13 |
+| After fixes | clean | 13/13, H05 passed by hand |
+
+Not every failure was the agent's fault, and the harness separates the two:
+
+- **U05 was a real agent error.** The agent turned a "no data" tool error into
+  "0 points". I fixed it in the instructions and tightened the check.
+- **H06 and U04 were grader errors.** Correct answers failed because the
+  expected-phrase lists were too narrow. I fixed the eval row and the scorer
+  and recorded the reason.
+
+### Retrieval
 
 Retrieval is tested separately by `tests/test_retrieval.py`, which calls
 Vertex AI and so is opt-in:
@@ -173,8 +197,18 @@ Vertex AI and so is opt-in:
 RUN_EMBED_TESTS=1 python -m pytest tests/test_retrieval.py -v -s
 ```
 
-It prints top-1 and top-3 hit rates over the core, stress and paraphrase
-questions in `evals/doc_facts.md`. The main set has been used to tune the instructions, so it’s a regression check, not an unbiased test. The hard set was tuned against after its first run, so it’s a development set too. H06’s check was widened after a correct answer failed on wording. The runs are single runs, on one model.
+It prints top-1 and top-3 hit rates over the questions in `evals/doc_facts.md`:
+top-1 [fill in], top-3 [fill in].
+
+### Caveats
+
+- The main set was used to tune the agent's instructions, so it is a
+  regression check, not an unbiased test. The hard set was also tuned against
+  after its first run, so it is a development set too.
+- H06's check was widened after a correct answer failed on wording.
+- 25 + 14 questions, single runs, one model. A perfect score here is not proof
+  of robustness.
+- Run-to-run consistency and a set of fresh, untuned questions are [not yet run].
 
 ## Limitations
 
@@ -183,7 +217,10 @@ questions in `evals/doc_facts.md`. The main set has been used to tune the instru
 - Match data ends in May 2026. There is no 2026/27 data, and the agent does
   not predict results.
 - Documents are synthetic.
+- Two rows (S06, H05) are checked by hand because the automatic check cannot
+  judge them.
+- Latency has occasional stalls of 17 to 32 s on single questions. The cause
+  is not yet isolated (see Evaluation).
 - The `global` endpoint does not pin requests to one region. For regulated
   data you would use a regional endpoint and choose a model by where it is
   available.
-- The eval baseline is small and was not blind (see above).
