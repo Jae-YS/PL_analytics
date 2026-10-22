@@ -1,3 +1,4 @@
+import logging
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -8,7 +9,8 @@ load_dotenv()
 from fastapi import FastAPI, HTTPException, status
 from google.adk.runners import InMemoryRunner
 from google.genai import types
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, StringConstraints
+from typing import Annotated
 
 from pl_agent.agent import root_agent
 from src.config import MODEL
@@ -20,14 +22,11 @@ DEFAULT_USER_ID = "default_user"
 app = FastAPI(title="PL Analytics API")
 runner = InMemoryRunner(agent=root_agent, app_name=APP_NAME)
 
+logger = logging.getLogger("ask_service")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 class AskRequest(BaseModel):
-    question: str = Field(
-        ...,
-        description="The question to ask the model",
-        min_length=3,
-        max_length=1000,
-    )
+    question: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=1000)]
 
 
 class AskResponse(BaseModel):
@@ -41,7 +40,7 @@ class AskResponse(BaseModel):
     output_tokens: int
     thought_tokens: int
     model_calls: int
-    cost_estimate_usd: Optional[float] = None
+    cost_estimate_usd: float | None = None
     error: Optional[str] = None
 
 
@@ -62,13 +61,17 @@ async def health():
 
 
 @app.post("/ask", response_model=AskResponse)
-async def ask(body: AskRequest):
-    question = body.question.strip()
-    if not question:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Question cannot be whitespace only.",
-        )
+async def ask_endpoint(payload: AskRequest):
+    request_id = str(uuid.uuid4())
+    start_time = time.perf_counter()
+
+    question = payload.question
+
+    logger.info(
+        "Request started: request_id=%s question_length=%d",
+        request_id,
+        len(question),
+    )
 
     session = await runner.session_service.create_session(
         app_name=APP_NAME,
@@ -76,8 +79,6 @@ async def ask(body: AskRequest):
     )
 
     message = types.Content(role="user", parts=[types.Part(text=question)])
-    
-    # Tool collection hook
     calls = start_collecting()
 
     res = {
@@ -86,11 +87,9 @@ async def ask(body: AskRequest):
         "output_tokens": 0,
         "thought_tokens": 0,
         "model_calls": 0,
-        "cost_estimate_usd": None, 
         "event_tools": [],
     }
 
-    start = time.perf_counter()
     try:
         async for event in runner.run_async(
             user_id=DEFAULT_USER_ID,
@@ -111,36 +110,79 @@ async def ask(body: AskRequest):
                     p.text for p in event.content.parts if getattr(p, "text", None)
                 )
 
+    except HTTPException:
+        raise
     except Exception as exc:
-        err_msg = str(exc).lower()
-        if any(term in err_msg for term in ["rate limit", "resource exhausted", "429"]):
+        latency_s = round(time.perf_counter() - start_time, 3)
+        logger.exception(
+            "Request failed: request_id=%s latency_sec=%.3f error=%s",
+            request_id,
+            latency_s,
+            type(exc).__name__,
+        )
+
+        err_msg = f"{type(exc).__name__}: {exc}".lower()
+
+        if any(term in err_msg for term in ["rate limit", "resource exhausted", "429", "503"]):
             raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Rate limit exceeded: {exc}",
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "message": "Upstream service temporarily overloaded. Please retry later.",
+                    "request_id": request_id,
+                },
+                headers={"Retry-After": "30"},
             )
+
         if any(term in err_msg for term in ["timeout", "timed out", "deadline"]):
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail=f"Request timed out: {exc}",
+                detail={
+                    "message": "Upstream service timed out.",
+                    "request_id": request_id,
+                },
             )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Agent execution failure: {type(exc).__name__} - {exc}",
+            detail={
+                "message": "An internal error occurred during execution.",
+                "request_id": request_id,
+            },
         )
 
-    latency_s = round(time.perf_counter() - start, 2)
+    latency_s = round(time.perf_counter() - start_time, 3)
 
-    # Empty answer check
     if not res["answer"]:
+        logger.error(
+            "Model finished without final text response: request_id=%s latency_sec=%.3f",
+            request_id,
+            latency_s,
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Model run completed without returning a final text response.",
+            detail={
+                "message": "Model run completed without returning a text response.",
+                "request_id": request_id,
+            },
         )
 
     unique_tools = list(dict.fromkeys([c.get("tool", "") for c in calls] + res["event_tools"]))
+    # to be fixed
+    cost = None
+    # cost = calculate_cost(res["input_tokens"], res["output_tokens"])
+
+    logger.info(
+        "Request completed: request_id=%s latency_sec=%.3f tools=%s tokens_in=%d tokens_out=%d cost_usd=%.6f",
+        request_id,
+        latency_s,
+        unique_tools,
+        res["input_tokens"],
+        res["output_tokens"],
+        cost,
+    )
 
     return AskResponse(
-        id=str(uuid.uuid4()),  # Stable unique request identifier
+        id=request_id, 
         question=question,
         answer=res["answer"],
         tools=unique_tools,
@@ -150,6 +192,5 @@ async def ask(body: AskRequest):
         output_tokens=res["output_tokens"],
         thought_tokens=res["thought_tokens"],
         model_calls=res["model_calls"],
-        cost_estimate_usd=res["cost_estimate_usd"],
-        error=None,
+        cost_estimate_usd=cost,
     )
