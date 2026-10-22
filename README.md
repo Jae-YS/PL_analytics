@@ -245,7 +245,32 @@ top-1 [fill in], top-3 [fill in].
   of robustness.
 - Consistency was checked with 3 runs per set (see above). H06 is flaky and
   was left failing when it fails: its check was not loosened a second time.
-- A set of fresh, untuned questions is [not yet run].
+
+### Fresh questions (untuned)
+
+`evals/fresh_set.jsonl` has 8 questions I wrote after the agent and checks were
+frozen: 3 stats, 1 combined, 2 docs, 2 unanswerable, in casual wording with
+typos. Expected answers were computed from the raw CSVs and the source
+documents, not from the agent's output. Single run, `gemini-3.5-flash-lite`.
+
+| | Result |
+| --- | --- |
+| Automatic | 7 of 8 pass |
+| After reading answers | [8 of 8 / fill in] |
+| Right tools | 8 of 8 |
+| Latency p50 / max | 3.2 s / 4.0 s |
+| Tokens (in / out) | 20,627 / 1,292 |
+| Estimated cost per question | $0.0012 |
+
+The one automatic failure, F03 (Spurs vs West Ham), was a grader error: the
+answer gave the correct counts (2 wins each, 2 draws) but my phrase list
+expected a word like "level". I did not edit the row.
+
+Four rows (F01 to F03 and F08) were run once in a partial run before the full
+set existed, so they are not fully blind. F04 to F07 were run for the first
+time in this run and passed 4 of 4. Eight questions and one run cannot support
+a percentage. The checks are substring and regex matches, so passes were read
+by hand.
 
 ## Limitations
 
